@@ -1,6 +1,3 @@
-\
-# improved_auto_reply.py
-# Robust IMAP->SMTP auto-reply script (production-ready helpers included)
 import imaplib
 import email
 from email import policy
@@ -18,9 +15,9 @@ from socket import gaierror
 load_dotenv()
 
 # Config
-IMAP_HOST = os.getenv("IMAP_HOST", "mail.nvisionbeyond.com")
+IMAP_HOST = os.getenv("IMAP_HOST", "mail.asterionsolutions.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
-SMTP_HOST = os.getenv("SMTP_HOST", "mail.nvisionbeyond.com")
+SMTP_HOST = os.getenv("SMTP_HOST", "mail.asterionsolutions.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
 USERNAME = os.getenv("OUTLOOK_USERNAME")
 PASSWORD = os.getenv("OUTLOOK_APP_PASSWORD")
@@ -28,12 +25,12 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", 120))
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Professionalized template values
-COMPANY_NAME = "Asterion Solutions Pvt. Ltd."
-SENDER_NAME = "Priya Sharma"
+# Professionalized template values (updated per your request)
+COMPANY_NAME = "Asterion Solutions Pvt. Ltd."   # dummy company name
+SENDER_NAME = "Priya Sharma"                    
 
 REPLY_SUBJECT_PREFIX = "Acknowledgement: "
-REPLY_BODY_TEMPLATE = \"\"\"\
+REPLY_BODY_TEMPLATE = """\
 Hello,
 
 Thank you for contacting {company_name}. We have received your message and appreciate you reaching out.
@@ -44,33 +41,39 @@ Best regards,
 {sender_name}
 {company_name}
 Email: {my_address}
-\"\"\"
+"""
 
+# Logging
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 BUSINESS_EMAIL_LINE_RE = re.compile(
-    r"business\s*email[:\\-\\s]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})",
+    r"business\s*email[:\-\s]*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
     re.I,
 )
 
 def is_auto_generated(msg):
+    """Return True if message looks like an auto-generated message we should not reply to."""
     auto_submitted = (msg.get("Auto-Submitted") or "").lower()
     if auto_submitted and auto_submitted != "no":
         return True
     precedence = (msg.get("Precedence") or "").lower()
     if precedence in ("bulk", "list", "auto_reply"):
         return True
+    # common list or unsubscribe headers indicate mass mail
     if msg.get("List-Id") or msg.get("List-Unsubscribe"):
         return True
+    # avoid mailer-daemon/bounce
     from_addr = email.utils.parseaddr(msg.get("From", ""))[1]
     if from_addr and ("mailer-daemon" in from_addr.lower() or "postmaster" in from_addr.lower()):
         return True
     return False
 
 def get_text_from_message(msg):
+    """Return best-effort plain-text representation: prefer text/plain, fall back to stripped text/html."""
     if msg.is_multipart():
+        # prefer text/plain
         for part in msg.walk():
             ctype = part.get_content_type()
             if ctype == "text/plain":
@@ -79,6 +82,7 @@ def get_text_from_message(msg):
                 except Exception:
                     payload = part.get_payload(decode=True)
                     return payload.decode(errors="ignore") if payload else ""
+        # fallback: text/html -> strip tags
         for part in msg.walk():
             if part.get_content_type() == "text/html":
                 try:
@@ -86,6 +90,7 @@ def get_text_from_message(msg):
                 except Exception:
                     payload = part.get_payload(decode=True)
                     html = payload.decode(errors="ignore") if payload else ""
+                # simple strip of tags (for a robust solution, use html2text or BeautifulSoup)
                 text = re.sub(r"<[^>]+>", "", html)
                 return text
         return ""
@@ -105,6 +110,10 @@ def decode_subject(subject_header):
         return subject_header
 
 def fetch_unseen_messages(imap_host, imap_port, username, password):
+    """
+    Connects to IMAP, fetches UNSEEN messages and returns a list of dicts with:
+    msg_num, from_addr, from_name, subject, body, raw_message
+    """
     messages = []
     try:
         imap = imaplib.IMAP4_SSL(imap_host, imap_port)
@@ -142,6 +151,10 @@ def fetch_unseen_messages(imap_host, imap_port, username, password):
     return messages
 
 def send_email_smtp(smtp_host, smtp_port, username, password, subject, body, from_addr, to_addrs, in_reply_to=None):
+    """
+    Sends an email via SMTP_SSL. Returns True on success, False on failure.
+    Respects TEST_MODE to avoid sending real mail during tests.
+    """
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = from_addr
@@ -166,23 +179,31 @@ def send_email_smtp(smtp_host, smtp_port, username, password, subject, body, fro
         return False
 
 def extract_business_email(body):
+    """
+    Try strict 'Business email' capture first; fallback to scanning near the phrase
+    or a generic email scan near 'business' / 'email' keywords.
+    """
     if not body:
         return None
+    # direct line pattern
     m = BUSINESS_EMAIL_LINE_RE.search(body)
     if m:
         candidate = m.group(1).strip()
         if EMAIL_RE.match(candidate):
             return candidate
+    # loose: find line that mentions "business" and "email" and an email near it
     lines = body.splitlines()
     for i, line in enumerate(lines):
         if "business" in line.lower() and "email" in line.lower():
-            m2 = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})", line)
+            # try to find email in the same line
+            m2 = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", line)
             if m2:
                 candidate = m2.group(1)
                 if EMAIL_RE.match(candidate):
                     return candidate
+            # try neighboring lines
             if i + 1 < len(lines):
-                m3 = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})", lines[i + 1])
+                m3 = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", lines[i + 1])
                 if m3:
                     candidate = m3.group(1)
                     if EMAIL_RE.match(candidate):
@@ -191,11 +212,19 @@ def extract_business_email(body):
 
 def auto_reply_if_business(imap_host, imap_port, smtp_host, smtp_port, username, password,
                            reply_subject_prefix, reply_body_template):
+    """
+    High-level function that:
+      - fetches unseen messages
+      - for each message, checks auto-generated headers
+      - extracts 'Business email'
+      - sends reply and marks the message as Answered/Seen
+    """
     new_messages = fetch_unseen_messages(imap_host, imap_port, username, password)
     if not new_messages:
         logging.info("No new messages to process right now.")
         return
 
+    # Open an IMAP connection to update flags after sending replies
     try:
         imap_conn = imaplib.IMAP4_SSL(imap_host, imap_port)
         imap_conn.login(username, password)
@@ -212,30 +241,34 @@ def auto_reply_if_business(imap_host, imap_port, smtp_host, smtp_port, username,
 
         logging.info("Processing message %s from %s (subject: %s)", msg_num, msg_info["from_addr"], subject)
 
+        # Skip auto-generated or list messages
         try:
             if is_auto_generated(raw_msg):
                 logging.info("Skipping auto-generated or list message: %s", msg_num)
-                imap_conn.store(msg_num, "+FLAGS", "\\\\Seen")
+                imap_conn.store(msg_num, "+FLAGS", "\\Seen")
                 continue
         except Exception:
             logging.exception("Error checking auto-generated headers; continuing.")
 
+        # Extract business email
         business_email = extract_business_email(body)
         if not business_email:
             logging.info("No business email found in message %s; marking Seen and skipping.", msg_num)
-            imap_conn.store(msg_num, "+FLAGS", "\\\\Seen")
+            imap_conn.store(msg_num, "+FLAGS", "\\Seen")
             continue
 
+        # Validate and avoid replying to self
         if not EMAIL_RE.match(business_email):
             logging.warning("Extracted business email '%s' is invalid. Skipping message %s.", business_email, msg_num)
-            imap_conn.store(msg_num, "+FLAGS", "\\\\Seen")
+            imap_conn.store(msg_num, "+FLAGS", "\\Seen")
             continue
 
         if business_email.lower() == (username or "").lower():
             logging.info("Extracted business email matches the sender account; skipping to avoid loop.")
-            imap_conn.store(msg_num, "+FLAGS", "\\\\Seen")
+            imap_conn.store(msg_num, "+FLAGS", "\\Seen")
             continue
 
+        # Prepare reply
         reply_subject = reply_subject_prefix + subject
         reply_body = reply_body_template.format(
             company_name=COMPANY_NAME,
@@ -244,6 +277,7 @@ def auto_reply_if_business(imap_host, imap_port, smtp_host, smtp_port, username,
         )
         in_reply_to = raw_msg.get("Message-ID")
 
+        # Send reply
         sent = send_email_smtp(
             smtp_host=smtp_host,
             smtp_port=smtp_port,
@@ -257,14 +291,16 @@ def auto_reply_if_business(imap_host, imap_port, smtp_host, smtp_port, username,
         )
 
         if sent:
+            # mark as answered and seen
             try:
-                imap_conn.store(msg_num, "+FLAGS", "\\\\Answered \\\\Seen")
+                imap_conn.store(msg_num, "+FLAGS", "\\Answered \\Seen")
                 logging.info("Marked message %s as Answered/Seen", msg_num)
             except Exception:
                 logging.exception("Failed to mark message %s flags after sending reply.", msg_num)
         else:
+            # if sending failed, mark as Seen so it doesn't continuously retry immediately
             try:
-                imap_conn.store(msg_num, "+FLAGS", "\\\\Seen")
+                imap_conn.store(msg_num, "+FLAGS", "\\Seen")
             except Exception:
                 logging.exception("Failed to mark message %s Seen after failed send.", msg_num)
 
